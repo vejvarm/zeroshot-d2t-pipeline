@@ -63,8 +63,8 @@ class Preprocessor:
 
         for lex in entry.lexs:
             example = {
-                "sents" : inp,
-                "text" : lex["text"]
+                "sents": inp,
+                "text": lex["text"]
             }
             examples.append(example)
 
@@ -194,7 +194,6 @@ class Preprocessor:
             with open(os.path.join(self.out_dirname, f"{split}_triples.out"), "w") as f:
                 for example in output["data"]:
                     f.write(example["text"] + "\n")
-
 
 
 if __name__ == '__main__':

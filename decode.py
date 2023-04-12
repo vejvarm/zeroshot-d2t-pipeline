@@ -98,10 +98,11 @@ if __name__ == "__main__":
     di.model.beam_size_decode = args.beam_size
 
     dataloader_map = {
-        "dev" : dm.val_dataloader,
-        "test" : dm.test_dataloader
+        "dev": dm.val_dataloader,
+        "test": dm.test_dataloader,
+        "train": dm.train_dataloader
     }
 
-    trainer.test(test_dataloaders=dataloader_map[args.split](), model=di.model)
+    trainer.test(dataloaders=dataloader_map[args.split](), model=di.model)
 
     out_file_handle.close()

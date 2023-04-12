@@ -4,32 +4,20 @@ import json
 import csv
 import os
 import logging
-import re
 import random
+import sys
 
+from pathlib import Path
 from collections import defaultdict, namedtuple
+
+from tqdm import tqdm
+
 from utils import webnlg_parsing
-from utils.corpus_reader.benchmark_reader import Benchmark, select_files
-from utils.tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
 
 DataTriple = namedtuple('DataTriple', ['subj', 'pred', 'obj'])
 
-def get_dataset_class(dataset_class):
-    """
-    A wrapper for easier introduction of new datasets.
-    Returns class "MyDataset" for a parameter "--dataset mydataset"
-    """
-    try:
-        # case-insensitive
-        available_classes = {o.name.lower() : o for o in globals().values() 
-                                if type(o)==type(D2TDataset) and hasattr(o, "name")}
-        return available_classes[dataset_class.lower()]
-    except AttributeError:
-        logger.error(f"Unknown dataset: '{args.dataset}'. Please create \
-            a class with an attribute name='{args.dataset}' in 'data.py'.")
-        return None
 
 class DataEntry:
     """
@@ -68,7 +56,7 @@ class D2TDataset:
 
 
 class WebNLG(D2TDataset):
-    name="webnlg"
+    dataset_name="webnlg"
 
     def __init__(self):
         super().__init__()
@@ -168,7 +156,7 @@ class WebNLG(D2TDataset):
 
 
 class E2E(D2TDataset):
-    name="e2e"
+    dataset_name="e2e"
 
     def __init__(self):
         super().__init__()
@@ -279,3 +267,153 @@ class E2E(D2TDataset):
 
         return template
 
+
+class WikiData(D2TDataset):
+    dataset_name="wikidata"
+
+    def __init__(self):
+        super().__init__()
+
+    def get_template(self, triple):
+        """
+        Return the template for the triple
+        """
+        pred = triple.pred
+
+        if pred in self.templates:
+            # Note: Sampling one of available templates from list
+            template = random.sample(self.templates[pred], 1)[0]
+        else:
+            logger.warning(f"No template for {pred}, using a fallback")
+            template = self.fallback_template
+
+        return template
+
+    # TODO: this is stage III, implement this after stage I and II are finished
+    def load_from_dir(self, path, template_path, splits):
+        """
+              will fill self.data[split] with 'entry' objects
+                'entry' == DataEntry(triples, lexs)
+                    'triples' == list of 'DataTriple' objects
+                        'DataTriple' == namedtuple('DataTriple', ['subj', 'pred', 'obj'])
+                    'lexs' == lexicon of correct answers (references) ... we don't need this!, just set to ''
+        """
+        self.load_templates(template_path)
+
+        for split in splits:
+            logger.info(f"Loading {split} split")
+            data_dir = os.path.join(path, split)
+            err = 0
+
+            entryset = self._load_jsons_from_dir(data_dir)
+
+            for entry_list in entryset:
+                triples = [DataTriple(e[0], e[1], e[2]) for e in entry_list]  # Refactor: populate triples with triples from entryset wrapped by DataTriple
+                lexs = self._extract_lexs(entry_list, triples)
+
+                if not any([lex for lex in lexs]):
+                    err += 1
+                    continue
+
+                entry = DataEntry(triples=triples, lexs=lexs)  # populate with lists of DataTriple
+                self.data[split].append(entry)  # populate data for the current split
+
+            if err > 0:
+                logger.warning(f"Skipping {err} entries without lexicalizations...")
+
+    def _load_jsons_from_dir(self, data_dir: str or Path) -> list[list[tuple]]:
+        """ Loads all json files from data_dir and parses their content into one list of lists of string tuples
+        containing their sid, rid, and oid.
+            The input json files have structure:
+            {"data": [["(sid | rid | oid)", "(sid | rid | oid)", ...]]}
+            The output list has structure:
+            [[("sid", "rid", "oid"), ("sid", "rid", "oid"), ...], [...], ...]
+        """
+        data_d = Path(data_dir)
+        files = data_d.glob("**/*.json")
+
+        final_list = []
+        for file in tqdm(files):
+            # print(file)
+            data = json.load(file.open("r"))["data"]
+
+            # Create a temporary list to store tuples of sid, rid, and oid for each file
+            temp_list = []
+
+            for item in data[0]:
+                # Split the string using the "|" character and strip any leading/trailing whitespace
+                sid, rid, oid = map(str.strip, item.split(" | "))
+
+                # Create a tuple and add it to the temporary list
+                temp_list.append((sid, rid, oid))
+
+            # Add the temporary list to the final list
+            final_list.append(temp_list)
+
+        return final_list
+
+    def _extract_lexs(self, lex_entries, triples):
+        """
+        Use `orderedtripleset` in the WebNLG dataset to determine the "ground-truth" order
+        of the triples (based on human references).
+        """
+        lexs = []
+        # print(lex_entries)
+        for entry in lex_entries:
+            order, agg = self._extract_ord_agg(triples)
+            lex = {
+                "text" : ' & '.join(e for e in entry),
+                "order" : order,
+                "agg" : agg
+            }
+            lexs.append(lex)
+
+        return lexs
+
+    def _extract_ord_agg(self, triples):
+        """
+        Determine the permutation indices and aggregation markers from
+        the ground truth.
+        """
+        order = list(range(len(triples)))
+        agg = list(range(len(triples)))
+        return order, agg    # NOTE: no need here
+
+
+def get_dataset_class(dataset_class):
+    """
+    A wrapper for easier introduction of new datasets.
+    Returns class "MyDataset" for a parameter "--dataset mydataset"
+    """
+    try:
+        # case-insensitive
+        # print(f"\n\n{globals().values()}\n")
+        available_classes = get_available_classes()
+        return available_classes[dataset_class.lower()]
+    except AttributeError:
+        logger.error(f"Unknown dataset: '{dataset_class}'. Please create \
+            a class with an attribute dataset_name='{dataset_class}' in 'data.py'.")
+        return None
+
+def get_available_classes():
+    result = {}
+    current_module = sys.modules[__name__]
+    for name in dir(current_module):
+        obj = getattr(current_module, name)
+        if isinstance(obj, type) and issubclass(obj, D2TDataset) and obj != D2TDataset and hasattr(obj, "dataset_name"):
+            result[obj.dataset_name.lower()] = obj
+    return result
+
+
+# test out the WikiData class:
+if __name__ == "__main__":
+    wk = WikiData()
+
+    splits = ["dev"]
+    path_to_data = "data/d2t/wikidata/data"
+    path_to_templates = "templates/templates-wikidata.json"
+
+    wk.load_from_dir(path_to_data, path_to_templates, splits)
+
+    print(wk.templates)
+    print(wk.data['dev'])
