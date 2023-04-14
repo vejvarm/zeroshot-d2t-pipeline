@@ -163,7 +163,7 @@ class Preprocessor:
                 f.write("\n")
         return
 
-    def process(self, split, shuffle, extract_copy_baseline, extract_order, extract_agg, keep_separate_sents):
+    def process(self, split, shuffle, extract_copy_baseline, extract_order, extract_agg, keep_separate_sents, keep_one_example_only):
         """
         Processes and outputs training data for the sentence fusion model
         """ 
@@ -180,9 +180,17 @@ class Preprocessor:
             else:
                 examples = self.create_examples(entry, dataset, shuffle, keep_separate_sents)
 
-            if examples and split != "train" and not extract_agg:
-                # keep just one example per tripleset
-                examples = [examples[0]]
+            # if examples and split != "train" and not extract_agg:
+            #     # keep just one example per tripleset
+            #     examples = [examples[0]]
+
+            if examples:
+                if (split == "train" or extract_agg) and not keep_one_example_only:
+                    # keep all examples
+                    examples = examples
+                else:
+                    # keep just one example per tripleset
+                    examples = examples[0:1]
 
             for example in examples:
                 output["data"].append(example)
@@ -222,6 +230,8 @@ if __name__ == '__main__':
         help="Extract ordering information (evaluation, WebNLG only).")
     parser.add_argument("--extract_agg", action="store_true",
         help="Extract aggregation information (evaluation, WebNLG only).")
+    parser.add_argument("--keep_one_example_only", action="store_true",
+        help="No matter the split, keep only one example")
     # parser.add_argument("--extract_mrs", action="store_true",
     #     help="Extract meaning representations for the slot error script (evaluation, E2E only).")
     args = parser.parse_args()
@@ -266,7 +276,8 @@ if __name__ == '__main__':
             extract_copy_baseline=args.extract_copy_baseline,
             extract_order=args.extract_order,
             extract_agg=args.extract_agg,
-            keep_separate_sents=args.keep_separate_sents
+            keep_separate_sents=args.keep_separate_sents,
+            keep_one_example_only=args.keep_one_example_only
         )
 
     if args.output_refs:

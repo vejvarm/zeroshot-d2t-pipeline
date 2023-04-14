@@ -6,15 +6,16 @@ import os
 import logging
 import random
 import sys
-
 from pathlib import Path
 from collections import defaultdict, namedtuple
 
 from tqdm import tqdm
 
 from utils import webnlg_parsing
+from helpers import setup_logger
 
-logger = logging.getLogger(__name__)
+
+logger = setup_logger(__name__, logging.WARNING, output_log_file="data_processing.log")
 
 DataTriple = namedtuple('DataTriple', ['subj', 'pred', 'obj'])
 
@@ -342,7 +343,13 @@ class WikiData(D2TDataset):
 
             for item in data[0]:
                 # Split the string using the "|" character and strip any leading/trailing whitespace
-                sid, rid, oid = map(str.strip, item.split(" | "))
+                try:
+                    sid, rid, oid = map(str.strip, item.split(" | "))
+                except ValueError as err:
+                    logger.warning(f"Split error at: f: {file}, item: {item} ({err})")
+                    oid = item.rsplit(" | ")[0]
+                    rid = item.rsplit(" | ")[1]
+                    sid = '+'.join(item.rsplit(" | ")[1:])
 
                 # Create a tuple and add it to the temporary list
                 temp_list.append((sid, rid, oid))
