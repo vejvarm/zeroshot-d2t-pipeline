@@ -8,17 +8,37 @@ import random
 import sys
 from pathlib import Path
 from collections import defaultdict, namedtuple
+from functools import partial
 
 from tqdm import tqdm
 
-from flags import NOT_SEPARATOR_FLAG, RDF_SEPARATOR
+from elasticsearch import Elasticsearch
+from flags import NOT_SEPARATOR_FLAG, RDF_SEPARATOR, ELASTIC_INDEX_ENT, ELASTIC_INDEX_REL
 from utils import webnlg_parsing
-from helpers import setup_logger
+from helpers import setup_logger, connect_to_elasticsearch, get_id_by_label, get_entity_label, get_relation_label
 
 
 logger = setup_logger(__name__, logging.WARNING, output_log_file="data_processing.log")
 
-DataTriple = namedtuple('DataTriple', ['subj', 'pred', 'obj'])
+
+class DataTriple:
+
+    def __init__(self, sid: str, rid: str, oid: str, es_client: Elasticsearch = None):
+        """ data class for rdf tripples which stores given sid, rid, oid as is given
+                and if es_client is given, try to get labels for given ids
+        """
+        self.sid = sid
+        self.rid = rid
+        self.oid = oid
+
+        if es_client is None:
+            self.subj = sid
+            self.pred = rid
+            self.obj = oid
+        else:
+            self.subj = get_entity_label(sid, es_client)
+            self.pred = get_relation_label(rid, es_client)
+            self.obj = get_entity_label(oid, es_client)
 
 
 class DataEntry:
@@ -31,6 +51,7 @@ class DataEntry:
 
     def __repr__(self):
         return str(self.__dict__)
+
 
 class D2TDataset:
     def __init__(self):
@@ -92,7 +113,7 @@ class WebNLG(D2TDataset):
             xml_entryset = webnlg_parsing.run_parser(data_dir)
 
             for xml_entry in xml_entryset:
-                triples = [DataTriple(e.subject, e.predicate, e.object) 
+                triples = [DataTriple(e.subject, e.predicate, e.object)
                                 for e in xml_entry.modifiedtripleset]
                 lexs = self._extract_lexs(xml_entry.lexEntries, triples)
 
@@ -116,9 +137,9 @@ class WebNLG(D2TDataset):
         for entry in lex_entries:
             order, agg = self._extract_ord_agg(triples, entry.orderedtripleset)
             lex = {
-                "text" : entry.text,
-                "order" : order,
-                "agg" : agg
+                "text": entry.text,
+                "order": order,
+                "agg": agg
             }
             lexs.append(lex)
 
@@ -154,7 +175,6 @@ class WebNLG(D2TDataset):
                 agg += [i] * len(triples_in_sent)
 
         return order, agg
-
 
 
 class E2E(D2TDataset):
@@ -275,6 +295,11 @@ class WikiData(D2TDataset):
 
     def __init__(self):
         super().__init__()
+        self.es_client = connect_to_elasticsearch()
+        self.get_ent_id = partial(get_id_by_label, es_client=self.es_client, index=ELASTIC_INDEX_ENT)
+        self.get_rel_id = partial(get_id_by_label, es_client=self.es_client, index=ELASTIC_INDEX_REL)
+        self.get_ent_label = partial(get_entity_label, es_client=self.es_client)
+        self.get_rel_label = partial(get_relation_label, es_client=self.es_client)
 
     def get_template(self, triple):
         """
@@ -310,7 +335,7 @@ class WikiData(D2TDataset):
             entryset = self._load_jsons_from_dir(data_dir)
 
             for entry_list in entryset:
-                triples = [DataTriple(e[0], e[1], e[2]) for e in entry_list]  # Refactor: populate triples with triples from entryset wrapped by DataTriple
+                triples = [DataTriple(e[0], e[1], e[2], self.es_client) for e in entry_list]  # Refactor: populate triples with triples from entryset wrapped by DataTriple
                 lexs = self._extract_lexs(entry_list, triples)
 
                 if not any([lex for lex in lexs]):
@@ -337,7 +362,10 @@ class WikiData(D2TDataset):
         final_list = []
         for file in tqdm(files):
             # print(file)
-            data = json.load(file.open("r"))["data"]
+            try:
+                data = json.load(file.open("r"))["data"]
+            except json.JSONDecodeError as err:
+                print(f"{data} ({err})")  # TODO: solve this
 
             # Create a temporary list to store tuples of sid, rid, and oid for each file
             temp_list = []

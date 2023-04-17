@@ -12,9 +12,11 @@ from utils.tokenizer import Tokenizer
 from data import DataTriple
 from collections import defaultdict
 from flags import RDF_SEPARATOR
+from tqdm import tqdm
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
+
 
 class Preprocessor:
     def __init__(self, dataset, out_dirname):
@@ -38,14 +40,11 @@ class Preprocessor:
                 )
         return template
 
-
     def create_examples(self, entry, dataset, shuffle, keep_separate_sents):
         """
         Generates training examples from an entry in the dataset
         """
         examples = []
-        lexs = entry.lexs
-        triples = entry.triples
         sentences = []
 
         for t in entry.triples:
@@ -81,16 +80,6 @@ class Preprocessor:
                 for lex in entry.lexs:
                     f.write(lex["text"] + "\n")
                 f.write("\n")
-
-
-    # def extract_mrs(self, out_dirname, split):
-    #     with open(f"{out_dirname}/{split}.ref", "w") as f:
-    #         data = self.dataset.data[split]
-
-    #         for entry in data:
-    #             # same mr for all lexs
-    #             mr = entry.lexs[0]["orig_mr"]
-    #             f.write(mr + "\n")
 
     def extract_agg(self, entry, dataset):
         examples = []
@@ -177,7 +166,7 @@ class Preprocessor:
             self.extract_order(self, split, extract_copy_baseline)
             return
         
-        for i, entry in enumerate(data):
+        for i, entry in tqdm(enumerate(data)):
             if extract_agg:
                 examples = self.extract_agg(entry, dataset)
             else:
@@ -185,9 +174,9 @@ class Preprocessor:
 
             if examples:
                 if concat_meta_fields:
-                    examples[0]["text"] = RDF_SEPARATOR.join(e["text"] for e in examples)
+                    examples[0]["text"] = f" {RDF_SEPARATOR} ".join(e["text"] for e in examples)
                     if "active_set" in examples[0].keys():
-                        examples[0]["active_set"] = [e["active_set"] for e in examples]
+                        examples[0]["active_set"] = [e["active_set"][0] for e in examples]
 
                 if (split == "train" or extract_agg) and not keep_one_example_only:
                     # keep all examples
