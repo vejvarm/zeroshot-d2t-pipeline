@@ -11,6 +11,7 @@ import numpy as np
 from utils.tokenizer import Tokenizer
 from data import DataTriple
 from collections import defaultdict
+from flags import RDF_SEPARATOR
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -64,8 +65,10 @@ class Preprocessor:
         for lex in entry.lexs:
             example = {
                 "sents": inp,
-                "text": lex["text"]
+                "text": lex["text"],
             }
+            if "active_set" in lex.keys():
+                example["active_set"] = [lex["active_set"]]
             examples.append(example)
 
         return examples
@@ -163,7 +166,7 @@ class Preprocessor:
                 f.write("\n")
         return
 
-    def process(self, split, shuffle, extract_copy_baseline, extract_order, extract_agg, keep_separate_sents, keep_one_example_only):
+    def process(self, split, shuffle, extract_copy_baseline, extract_order, extract_agg, keep_separate_sents, keep_one_example_only, concat_meta_fields=False):
         """
         Processes and outputs training data for the sentence fusion model
         """ 
@@ -180,11 +183,12 @@ class Preprocessor:
             else:
                 examples = self.create_examples(entry, dataset, shuffle, keep_separate_sents)
 
-            # if examples and split != "train" and not extract_agg:
-            #     # keep just one example per tripleset
-            #     examples = [examples[0]]
-
             if examples:
+                if concat_meta_fields:
+                    examples[0]["text"] = RDF_SEPARATOR.join(e["text"] for e in examples)
+                    if "active_set" in examples[0].keys():
+                        examples[0]["active_set"] = [e["active_set"] for e in examples]
+
                 if (split == "train" or extract_agg) and not keep_one_example_only:
                     # keep all examples
                     examples = examples
@@ -232,8 +236,8 @@ if __name__ == '__main__':
         help="Extract aggregation information (evaluation, WebNLG only).")
     parser.add_argument("--keep_one_example_only", action="store_true",
         help="No matter the split, keep only one example")
-    # parser.add_argument("--extract_mrs", action="store_true",
-    #     help="Extract meaning representations for the slot error script (evaluation, E2E only).")
+    parser.add_argument("--concat_meta_fields", action="store_true",
+        help="Concatenate text from all examples into example[0]. Good to combine with --keep_one_example_only")
     args = parser.parse_args()
     random.seed(args.seed)
 
@@ -266,18 +270,15 @@ if __name__ == '__main__':
         out_dirname=out_dirname,
     )
 
-    # if args.extract_mrs:    
-    #     for split in args.splits:
-    #         preprocessor.extract_mrs(out_dirname, split)
-
     for split in args.splits:
         preprocessor.process(split, 
-            shuffle=args.shuffle, 
-            extract_copy_baseline=args.extract_copy_baseline,
-            extract_order=args.extract_order,
-            extract_agg=args.extract_agg,
-            keep_separate_sents=args.keep_separate_sents,
-            keep_one_example_only=args.keep_one_example_only
+                             shuffle=args.shuffle,
+                             extract_copy_baseline=args.extract_copy_baseline,
+                             extract_order=args.extract_order,
+                             extract_agg=args.extract_agg,
+                             keep_separate_sents=args.keep_separate_sents,
+                             keep_one_example_only=args.keep_one_example_only,
+                             concat_meta_fields=args.concat_meta_fields
         )
 
     if args.output_refs:

@@ -11,6 +11,7 @@ from collections import defaultdict, namedtuple
 
 from tqdm import tqdm
 
+from flags import NOT_SEPARATOR_FLAG, RDF_SEPARATOR
 from utils import webnlg_parsing
 from helpers import setup_logger
 
@@ -326,7 +327,7 @@ class WikiData(D2TDataset):
         """ Loads all json files from data_dir and parses their content into one list of lists of string tuples
         containing their sid, rid, and oid.
             The input json files have structure:
-            {"data": [["(sid | rid | oid)", "(sid | rid | oid)", ...]]}
+            {"data": [["(sid [RDF_SEPARATOR] rid [RDF_SEPARATOR] oid)", "(sid [RDF_SEPARATOR] rid [RDF_SEPARATOR] oid)", ...]]}
             The output list has structure:
             [[("sid", "rid", "oid"), ("sid", "rid", "oid"), ...], [...], ...]
         """
@@ -342,15 +343,23 @@ class WikiData(D2TDataset):
             temp_list = []
 
             for item in data[0]:
-                # Split the string using the "|" character and strip any leading/trailing whitespace
+                # Split the string using RDF_SEPARATOR as split str and strip any leading/trailing whitespace
                 try:
-                    sid, rid, oid = map(str.strip, item.split(" | "))
+                    sid, rid, oid = map(str.strip, item.split(f" {RDF_SEPARATOR} "))
                 except ValueError as err:
-                    logger.warning(f"Split error at: f: {file}, item: {item} ({err})")
-                    oid = item.rsplit(" | ")[0]
-                    rid = item.rsplit(" | ")[1]
-                    sid = '+'.join(item.rsplit(" | ")[1:])
-
+                    # there are more than 3 RDF_SEPARATOR string sequences in item
+                    # NOTE: legacy in case RDF_SEPARATOR == "|"
+                    logger.warning(f"Split error at: f: {file}, item: {item} ({err}) (checking for NOT_SEPARATOR_FLAG)")
+                    not_sep_item = item.replace(f"{NOT_SEPARATOR_FLAG}_{RDF_SEPARATOR}", "<<&placeholder>>")
+                    try:
+                        sid, rid, oid = [s.replace("<<&placeholder>>", f"{NOT_SEPARATOR_FLAG}_{RDF_SEPARATOR}") for s in
+                                            map(str.strip, not_sep_item.split(f" {RDF_SEPARATOR} "))]
+                    except ValueError as err:
+                        logger.warning(
+                            f"Split error at: f: {file}, item: {item} ({err}) NOT RESOLVED! Falling back to legacy")
+                        oid = item.rsplit(f" {RDF_SEPARATOR} ")[0]
+                        rid = item.rsplit(f" {RDF_SEPARATOR} ")[1]
+                        sid = '+'.join(item.rsplit(f" {RDF_SEPARATOR} ")[1:])
                 # Create a tuple and add it to the temporary list
                 temp_list.append((sid, rid, oid))
 
@@ -368,10 +377,12 @@ class WikiData(D2TDataset):
         # print(lex_entries)
         for entry in lex_entries:
             order, agg = self._extract_ord_agg(triples)
+            s, r, o = entry
             lex = {
-                "text" : ' & '.join(e for e in entry),
-                "order" : order,
-                "agg" : agg
+                "text": f'{s} {RDF_SEPARATOR} {r} {RDF_SEPARATOR} {o}',
+                "active_set": f"i({s},{r},{o})",
+                "order": order,
+                "agg": agg
             }
             lexs.append(lex)
 
