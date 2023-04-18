@@ -36,9 +36,9 @@ class DataTriple:
             self.pred = rid
             self.obj = oid
         else:
-            self.subj = get_entity_label(sid, es_client)
-            self.pred = get_relation_label(rid, es_client)
-            self.obj = get_entity_label(oid, es_client)
+            self.subj = get_entity_label(sid, es_client, logger=logger)
+            self.pred = get_relation_label(rid, es_client, logger=logger)
+            self.obj = get_entity_label(oid, es_client, logger=logger)
 
 
 class DataEntry:
