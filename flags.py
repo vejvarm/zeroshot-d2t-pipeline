@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 NOT_SEPARATOR_FLAG = "<&NOT>"
-RDF_SEPARATOR = "|"  # '<&SEP>'  # NOTE: legacy '|' has problems as it is present in some entity labels
+RDF_SEPARATOR = "<&SEP>"  # '<&SEP>'  # NOTE: legacy '|' has problems as it is present in some entity labels
 
 ROOT_PATH = Path(os.path.dirname(__file__))
 ELASTIC_USER = 'elastic'

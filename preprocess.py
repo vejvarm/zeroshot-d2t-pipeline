@@ -6,11 +6,9 @@ import logging
 import data
 import json
 import random
-import re
 import numpy as np
 from utils.tokenizer import Tokenizer
 from data import DataTriple
-from collections import defaultdict
 from flags import RDF_SEPARATOR
 from tqdm import tqdm
 
