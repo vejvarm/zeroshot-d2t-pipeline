@@ -9,11 +9,13 @@ import sys
 from pathlib import Path
 from collections import defaultdict, namedtuple
 from functools import partial
+from concurrent.futures import ThreadPoolExecutor
+
 
 from tqdm import tqdm
 
 from elasticsearch import Elasticsearch
-from flags import NOT_SEPARATOR_FLAG, RDF_SEPARATOR, ELASTIC_INDEX_ENT, ELASTIC_INDEX_REL
+from flags import NOT_SEPARATOR_FLAG, RDF_SEPARATOR, ELASTIC_INDEX_ENT, ELASTIC_INDEX_REL, WIKIDATA_ENT_DICT_PATH, WIKIDATA_REL_DICT_PATH
 from utils import webnlg_parsing
 from helpers import setup_logger, connect_to_elasticsearch, get_id_by_label, get_entity_label, get_relation_label
 
@@ -23,7 +25,8 @@ logger = setup_logger(__name__, logging.WARNING, output_log_file="data_processin
 
 class DataTriple:
 
-    def __init__(self, sid: str, rid: str, oid: str, es_client: Elasticsearch = None):
+    def __init__(self, sid: str, rid: str, oid: str, ent_dict: dict = None, rel_dict: dict = None,
+                 es_client: Elasticsearch = None):
         """ data class for rdf tripples which stores given sid, rid, oid as is given
                 and if es_client is given, try to get labels for given ids
         """
@@ -31,14 +34,22 @@ class DataTriple:
         self.rid = rid
         self.oid = oid
 
-        if es_client is None:
-            self.subj = sid
-            self.pred = rid
-            self.obj = oid
-        else:
-            self.subj = get_entity_label(sid, es_client, logger=logger)
-            self.pred = get_relation_label(rid, es_client, logger=logger)
-            self.obj = get_entity_label(oid, es_client, logger=logger)
+        self.subj = sid
+        self.obj = oid
+        self.pred = rid
+
+        # fill with labels if possible
+        if ent_dict or es_client:
+            self.subj = get_entity_label(sid, ent_dict, es_client, logger=logger)
+            self.obj = get_entity_label(oid, ent_dict, es_client, logger=logger)
+
+        if rel_dict or es_client:
+            self.pred = get_relation_label(rid, rel_dict, es_client, logger=logger)
+
+
+
+
+
 
 
 class DataEntry:
@@ -295,6 +306,16 @@ class WikiData(D2TDataset):
 
     def __init__(self):
         super().__init__()
+        try:
+            self.ent_dict = json.load(WIKIDATA_ENT_DICT_PATH.open())
+        except FileNotFoundError:
+            logger.info(f"No entity_id to label dictionary found at {WIKIDATA_ENT_DICT_PATH}. Check WIKIDATA_ENT_DICT_PATH in flags.py")
+            self.ent_dict = None
+        try:
+            self.rel_dict = json.load(WIKIDATA_REL_DICT_PATH.open())
+        except FileNotFoundError:
+            logger.info(f"No relation_id to label dictionary found at {WIKIDATA_REL_DICT_PATH}. Check WIKIDATA_ENT_DICT_PATH in flags.py")
+            self.rel_dict = None
         self.es_client = connect_to_elasticsearch()
         self.get_ent_id = partial(get_id_by_label, es_client=self.es_client, index=ELASTIC_INDEX_ENT)
         self.get_rel_id = partial(get_id_by_label, es_client=self.es_client, index=ELASTIC_INDEX_REL)
@@ -316,7 +337,20 @@ class WikiData(D2TDataset):
 
         return template
 
-    # TODO: this is stage III, implement this after stage I and II are finished
+    def create_data_triple(self, e):
+        return DataTriple(e[0], e[1], e[2], self.ent_dict, self.rel_dict, self.es_client)
+
+    def process_entry(self, entry_list):
+        logger.info("populating DataTriple structures")
+        triples = [self.create_data_triple(e) for e in entry_list]
+        logger.info("extracting lexs")
+        lexs = self._extract_lexs(entry_list, triples)
+
+        if not any([lex for lex in lexs]):
+            return None
+
+        return DataEntry(triples=triples, lexs=lexs)  # populate with lists of DataTriple
+
     def load_from_dir(self, path, template_path, splits):
         """
               will fill self.data[split] with 'entry' objects
@@ -334,16 +368,18 @@ class WikiData(D2TDataset):
 
             entryset = self._load_jsons_from_dir(data_dir)
 
-            for entry_list in entryset:
-                triples = [DataTriple(e[0], e[1], e[2], self.es_client) for e in entry_list]  # Refactor: populate triples with triples from entryset wrapped by DataTriple
-                lexs = self._extract_lexs(entry_list, triples)
+            for entry in entryset:
+                entry = self.process_entry(entry)
+            #
+            # with ThreadPoolExecutor(max_workers=1) as executor:
+            #     processed_entries = executor.map(self.process_entry, entryset)
 
-                if not any([lex for lex in lexs]):
+                logger.info(f"appending entries to to data[{split}]")
+            # for entry in processed_entries:
+                if entry is not None:
+                    self.data[split].append(entry)
+                else:
                     err += 1
-                    continue
-
-                entry = DataEntry(triples=triples, lexs=lexs)  # populate with lists of DataTriple
-                self.data[split].append(entry)  # populate data for the current split
 
             if err > 0:
                 logger.warning(f"Skipping {err} entries without lexicalizations...")
@@ -365,31 +401,32 @@ class WikiData(D2TDataset):
             try:
                 data = json.load(file.open("r"))["data"]
             except json.JSONDecodeError as err:
-                print(f"{data} ({err})")  # TODO: solve this
+                logger.warning(f"{data} ({err})")  # TODO: solve this
 
             # Create a temporary list to store tuples of sid, rid, and oid for each file
             temp_list = []
 
-            for item in data[0]:
-                # Split the string using RDF_SEPARATOR as split str and strip any leading/trailing whitespace
-                try:
-                    sid, rid, oid = map(str.strip, item.split(f" {RDF_SEPARATOR} "))
-                except ValueError as err:
-                    # there are more than 3 RDF_SEPARATOR string sequences in item
-                    # NOTE: legacy in case RDF_SEPARATOR == "|"
-                    logger.warning(f"Split error at: f: {file}, item: {item} ({err}) (checking for NOT_SEPARATOR_FLAG)")
-                    not_sep_item = item.replace(f"{NOT_SEPARATOR_FLAG}_{RDF_SEPARATOR}", "<<&placeholder>>")
+            for entry in data:
+                for item in entry:
+                    # Split the string using RDF_SEPARATOR as split str and strip any leading/trailing whitespace
                     try:
-                        sid, rid, oid = [s.replace("<<&placeholder>>", f"{NOT_SEPARATOR_FLAG}_{RDF_SEPARATOR}") for s in
-                                            map(str.strip, not_sep_item.split(f" {RDF_SEPARATOR} "))]
+                        sid, rid, oid = map(str.strip, item.split(f" {RDF_SEPARATOR} "))
                     except ValueError as err:
-                        logger.warning(
-                            f"Split error at: f: {file}, item: {item} ({err}) NOT RESOLVED! Falling back to legacy")
-                        oid = item.rsplit(f" {RDF_SEPARATOR} ")[0]
-                        rid = item.rsplit(f" {RDF_SEPARATOR} ")[1]
-                        sid = '+'.join(item.rsplit(f" {RDF_SEPARATOR} ")[1:])
-                # Create a tuple and add it to the temporary list
-                temp_list.append((sid, rid, oid))
+                        # there are more than 3 RDF_SEPARATOR string sequences in item
+                        # NOTE: legacy in case RDF_SEPARATOR == "|"
+                        logger.warning(f"Split error at: f: {file}, item: {item} ({err}) (checking for NOT_SEPARATOR_FLAG)")
+                        not_sep_item = item.replace(f"{NOT_SEPARATOR_FLAG}_{RDF_SEPARATOR}", "<<&placeholder>>")
+                        try:
+                            sid, rid, oid = [s.replace("<<&placeholder>>", f"{NOT_SEPARATOR_FLAG}_{RDF_SEPARATOR}") for s in
+                                                map(str.strip, not_sep_item.split(f" {RDF_SEPARATOR} "))]
+                        except ValueError as err:
+                            logger.warning(
+                                f"Split error at: f: {file}, item: {item} ({err}) NOT RESOLVED! Falling back to legacy")
+                            oid = item.rsplit(f" {RDF_SEPARATOR} ")[0]
+                            rid = item.rsplit(f" {RDF_SEPARATOR} ")[1]
+                            sid = '+'.join(item.rsplit(f" {RDF_SEPARATOR} ")[1:])
+                    # Create a tuple and add it to the temporary list
+                    temp_list.append((sid, rid, oid))
 
             # Add the temporary list to the final list
             final_list.append(temp_list)
@@ -440,6 +477,7 @@ def get_dataset_class(dataset_class):
         logger.error(f"Unknown dataset: '{dataset_class}'. Please create \
             a class with an attribute dataset_name='{dataset_class}' in 'data.py'.")
         return None
+
 
 def get_available_classes():
     result = {}

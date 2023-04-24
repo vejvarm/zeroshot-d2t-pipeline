@@ -9,10 +9,11 @@ import random
 import numpy as np
 from utils.tokenizer import Tokenizer
 from data import DataTriple
+import multiprocessing as mp
 from flags import RDF_SEPARATOR
 from tqdm import tqdm
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, datefmt='%H:%M:%S')
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.ERROR, datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
 
 
@@ -27,15 +28,15 @@ class Preprocessor:
         Fills a template with the data from the triple
         """
         for item, placeholder in [
-            (triple.subj, "<subject>"), 
-            (triple.pred, "<predicate>"), 
+            (triple.subj, "<subject>"),
+            (triple.pred, "<predicate>"),
             (triple.obj, "<object>")
         ]:
-            template = template.replace(placeholder, 
-                self.tokenizer.normalize(item, 
-                    remove_quotes=True, 
-                    remove_parentheses=True)
-                )
+            template = template.replace(placeholder,
+                                        self.tokenizer.normalize(item,
+                                                                 remove_quotes=True,
+                                                                 remove_parentheses=True)
+                                        )
         return template
 
     def create_examples(self, entry, dataset, shuffle, keep_separate_sents):
@@ -90,7 +91,7 @@ class Preprocessor:
         for lex in entry.lexs:
             if not lex["order"] or not lex["agg"]:
                 continue
-            
+
             # get the "reordering indices" for the given order
             order = np.argsort(lex["order"])
             # reorder the triples
@@ -107,20 +108,19 @@ class Preprocessor:
                 sentences.append(sentence)
 
                 if i < len(triples_reordered) - 1:
-                    if lex["agg"][i+1] != prev_sent:
+                    if lex["agg"][i + 1] != prev_sent:
                         agg.append(1)
-                        prev_sent = lex["agg"][i+1]
+                        prev_sent = lex["agg"][i + 1]
                     else:
                         agg.append(0)
 
             example = {
-                "sents" : sentences,
-                "sep" : agg
+                "sents": sentences,
+                "sep": agg
             }
             examples.append(example)
-            
-        return examples
 
+        return examples
 
     def extract_order(self, split, extract_copy_baseline):
         with open(os.path.join(self.out_dirname, f"{split}.order.out"), "w") as f:
@@ -153,78 +153,141 @@ class Preprocessor:
                 f.write("\n")
         return
 
-    def process(self, split, shuffle, extract_copy_baseline, extract_order, extract_agg, keep_separate_sents, keep_one_example_only, concat_meta_fields=False):
+    def process_entry(self, entry, shuffle, extract_agg, keep_separate_sents, keep_one_example_only, concat_meta_fields):
+        dataset = self.dataset
+        if extract_agg:
+            examples = self.extract_agg(entry, dataset)
+        else:
+            examples = self.create_examples(entry, dataset, shuffle, keep_separate_sents)
+
+        if examples:
+            if concat_meta_fields:
+                examples[0]["text"] = f" {RDF_SEPARATOR} ".join(e["text"] for e in examples)
+                if "active_set" in examples[0].keys():
+                    examples[0]["active_set"] = [e["active_set"][0] for e in examples]
+
+            if (split == "train" or extract_agg) and not keep_one_example_only:
+                # keep all examples
+                examples = examples
+            else:
+                # keep just one example per tripleset
+                examples = examples[0:1]
+
+        return examples
+
+    def process_worker(self, entries, output_queue, shuffle, extract_agg, keep_separate_sents, keep_one_example_only, concat_meta_fields):
+        output_data = []
+        for entry in entries:
+            examples = self.process_entry(entry, shuffle, extract_agg, keep_separate_sents, keep_one_example_only, concat_meta_fields)
+            output_data.extend(examples)
+        output_queue.put(output_data)
+
+    def process(self, split, num_workers, shuffle, extract_copy_baseline, extract_order, extract_agg, keep_separate_sents,
+                keep_one_example_only, concat_meta_fields=False):
         """
         Processes and outputs training data for the sentence fusion model
-        """ 
-        output = {"data" : []}
+        """
         data = self.dataset.data[split]
 
         if extract_order:
             self.extract_order(self, split, extract_copy_baseline)
             return
-        
-        for i, entry in tqdm(enumerate(data)):
-            if extract_agg:
-                examples = self.extract_agg(entry, dataset)
-            else:
-                examples = self.create_examples(entry, dataset, shuffle, keep_separate_sents)
 
-            if examples:
-                if concat_meta_fields:
-                    examples[0]["text"] = f" {RDF_SEPARATOR} ".join(e["text"] for e in examples)
-                    if "active_set" in examples[0].keys():
-                        examples[0]["active_set"] = [e["active_set"][0] for e in examples]
+        # Split the data into chunks for each worker
+        n_data = len(data)
+        if n_data < num_workers:
+            chunks = [data]
+        else:
+            chunk_size = n_data // num_workers
+            chunks = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
 
-                if (split == "train" or extract_agg) and not keep_one_example_only:
-                    # keep all examples
-                    examples = examples
+
+        # Create a queue to collect the results
+        # output_queue = mp.Queue()
+        #
+        # # Create and start the worker processes
+        # processes = [mp.Process(target=self.process_worker, args=(chunk, output_queue, shuffle, extract_agg, keep_separate_sents, keep_one_example_only, concat_meta_fields))
+        #              for chunk in chunks]
+        #
+        # for p in processes:
+        #     p.start()
+        #
+        # # Collect the results from the queue
+        # for chunk_index in range(len(chunks)):
+        #     output_data = output_queue.get()
+        #     # print(output_data)
+        #     output["data"] = output_data
+        #
+        #     # Write the output to a file
+        #     with open(os.path.join(self.out_dirname, f"{split}_chunk{chunk_index:02d}.json"), "w") as f:
+        #         json.dump(output, f, indent=4, ensure_ascii=False)
+        #
+        # # Wait for all worker processes to finish
+        # for p in processes:
+        #     p.join()
+        for ci, chunk in tqdm(enumerate(chunks)):
+            chunk_output = {"data": []}
+            for entry in tqdm(chunk):
+                if extract_agg:
+                    examples = self.extract_agg(entry, dataset)
                 else:
-                    # keep just one example per tripleset
-                    examples = examples[0:1]
+                    examples = self.create_examples(entry, dataset, shuffle, keep_separate_sents)
 
-            for example in examples:
-                output["data"].append(example)
+                if examples:
+                    if concat_meta_fields:
+                        examples[0]["text"] = f" {RDF_SEPARATOR} ".join(e["text"] for e in examples)
+                        if "active_set" in examples[0].keys():
+                            examples[0]["active_set"] = [e["active_set"][0] for e in examples]
 
-        with open(os.path.join(self.out_dirname, f"{split}.json"), "w") as f:
-            json.dump(output, f, indent=4, ensure_ascii=False)
+                    if (split == "train" or extract_agg) and not keep_one_example_only:
+                        # keep all examples
+                        examples = examples
+                    else:
+                        # keep just one example per tripleset
+                        examples = examples[0:1]
 
-        if extract_copy_baseline and split != "train":
-            with open(os.path.join(self.out_dirname, f"{split}_triples.out"), "w") as f:
-                for example in output["data"]:
-                    f.write(example["text"] + "\n")
+                for example in examples:
+                    chunk_output["data"].append(example)
 
+            with open(os.path.join(self.out_dirname, f"{split}_chunk{ci:02d}.json"), "w") as f:
+                json.dump(chunk_output, f, indent=4, ensure_ascii=False)
+
+            if extract_copy_baseline and split != "train":
+                with open(os.path.join(self.out_dirname, f"{split}_triples.out"), "w") as f:
+                    for example in chunk_output["data"]:
+                        f.write(example["text"] + "\n")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, required=True,
-        help="Name of the dataset to preprocess.")
+                        help="Name of the dataset to preprocess.")
     parser.add_argument("--dataset_dir", type=str, default=None,
-        help="Path to the dataset")
+                        help="Path to the dataset")
     parser.add_argument("--templates", type=str, default=None,
-        help="Path to the JSON file with templates")
+                        help="Path to the JSON file with templates")
     parser.add_argument("--output", type=str, required=True,
-        help="Name of the output directory")
+                        help="Name of the output directory")
     parser.add_argument("--output_refs", type=str, default=None,
-        help="Name of the output directory for references.")
-    parser.add_argument('--splits', type=str, nargs='+', default=["train", "dev", "test"],
-                    help='Dataset splits (e.g. train dev test)')
+                        help="Name of the output directory for references.")
+    parser.add_argument('--splits', type=str, nargs='+', default=["dev", "test", "train"],
+                        help='Dataset splits (e.g. train dev test)')
     parser.add_argument("--seed", type=int, default=42,
-        help="Random seed.")
+                        help="Random seed.")
     parser.add_argument("--shuffle", action="store_true",
-        help="Shuffle input sentences.")
+                        help="Shuffle input sentences.")
     parser.add_argument("--keep_separate_sents", action="store_true",
-        help="Keep a list of individual sentences as the input.")
+                        help="Keep a list of individual sentences as the input.")
     parser.add_argument("--extract_copy_baseline", action="store_true",
-        help="Extract inputs to a separate file for the copy baseline.")
+                        help="Extract inputs to a separate file for the copy baseline.")
     parser.add_argument("--extract_order", action="store_true",
-        help="Extract ordering information (evaluation, WebNLG only).")
+                        help="Extract ordering information (evaluation, WebNLG only).")
     parser.add_argument("--extract_agg", action="store_true",
-        help="Extract aggregation information (evaluation, WebNLG only).")
+                        help="Extract aggregation information (evaluation, WebNLG only).")
     parser.add_argument("--keep_one_example_only", action="store_true",
-        help="No matter the split, keep only one example")
+                        help="No matter the split, keep only one example")
     parser.add_argument("--concat_meta_fields", action="store_true",
-        help="Concatenate text from all examples into example[0]. Good to combine with --keep_one_example_only")
+                        help="Concatenate text from all examples into example[0]. Good to combine with --keep_one_example_only")
+    parser.add_argument("--num_workers", type=int, default=12)
     args = parser.parse_args()
     random.seed(args.seed)
 
@@ -242,7 +305,7 @@ if __name__ == '__main__':
     except FileNotFoundError as err:
         logger.error(f"Dataset not found in {path}")
         raise err
-        
+
     # Create output directory
     try:
         out_dirname = os.path.join(args.output)
@@ -253,12 +316,13 @@ if __name__ == '__main__':
 
     os.makedirs(out_dirname, exist_ok=True)
 
-    preprocessor = Preprocessor(dataset=dataset, 
-        out_dirname=out_dirname,
-    )
+    preprocessor = Preprocessor(dataset=dataset,
+                                out_dirname=out_dirname,
+                                )
 
     for split in args.splits:
-        preprocessor.process(split, 
+        preprocessor.process(split,
+                             num_workers=args.num_workers,
                              shuffle=args.shuffle,
                              extract_copy_baseline=args.extract_copy_baseline,
                              extract_order=args.extract_order,
@@ -266,7 +330,7 @@ if __name__ == '__main__':
                              keep_separate_sents=args.keep_separate_sents,
                              keep_one_example_only=args.keep_one_example_only,
                              concat_meta_fields=args.concat_meta_fields
-        )
+                             )
 
     if args.output_refs:
         os.makedirs(args.output_refs, exist_ok=True)

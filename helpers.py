@@ -1,9 +1,13 @@
 import logging
 import pathlib
+import time
 
 from typing import Union, Sequence
+
+import elastic_transport
+import elasticsearch
 from ordered_set import OrderedSet
-from elasticsearch import Elasticsearch, NotFoundError
+from elasticsearch import Elasticsearch, NotFoundError, ConnectionError
 from wikidata.client import Client as WDClient
 from wikidata.entity import EntityId
 from urllib.error import HTTPError
@@ -34,14 +38,23 @@ def setup_logger(name=__name__, loglevel=logging.DEBUG, handlers=None, output_lo
     return logger
 
 
-def connect_to_elasticsearch(user=ELASTIC_USER, password=ELASTIC_PASSWORD):
+def connect_to_elasticsearch(user=ELASTIC_USER, password=ELASTIC_PASSWORD, num_tries=5):
     """Connect to Elasticsearch client using urls and credentials from args.py"""
-    return Elasticsearch(
+    client = Elasticsearch(
         ELASTIC_HOST,
         ca_certs=ELASTIC_CERTS,
         basic_auth=(user, password),  # refer to args.py --elastic_password for alternatives
         retry_on_timeout=True,
     )
+
+    for i in range(num_tries):
+        if client.ping():
+            return client
+        else:
+            time.sleep(0.5)
+
+    print("Couldn't connect to elasticsearch database, returning None")
+    return None
 
 
 def _uppercase_sequence(sequence: Union[Sequence[str], OrderedSet[str]], tp):
@@ -86,13 +99,19 @@ def get_id_by_label(label: str, es_client: Elasticsearch, index: str) -> str:
 
 
 @uppercase
-def _get_label(gid: str, index: str, es_client: Elasticsearch, wd_client: WDClient, logger: logging.Logger):
+def _get_label(gid: str, id2label_dict: dict, index: str, es_client: Elasticsearch, wd_client: WDClient, logger: logging.Logger):
     """Generic get label for given gid in given index if it exists"""
-    if not es_client.exists(index=index, id=gid):
-        logger.info(f"entity with {gid} doesn't exist in {index}. Trying to fetch from online WikiData DB.")
-        return _get_english_label_from_wikidata(gid, wd_client, logger)
+    if id2label_dict is not None:
+        try:
+            return id2label_dict[gid]
+        except KeyError:
+            logger.info(f"entity/relation with {gid} is not in given entity dictionary. Trying Elasticsearch index.")
 
-    return es_client.get(index=index, id=gid)['_source']['label']
+    if es_client is not None and es_client.exists(index=index, id=gid):
+        return es_client.get(index=index, id=gid)['_source']['label']
+
+    logger.info(f"entity with {gid} doesn't exist in {index}. Trying to fetch from online WikiData DB.")
+    return _get_english_label_from_wikidata(gid, wd_client, logger)
 
 
 @uppercase
@@ -112,20 +131,20 @@ def _get_english_label_from_wikidata(gid: str or EntityId, wd_client: WDClient, 
 
 
 @uppercase
-def get_entity_label(eid: str, es_client: Elasticsearch = connect_to_elasticsearch(),
+def get_entity_label(eid: str, ent_dict: dict = None, es_client: Elasticsearch = None,
                      wd_client: WDClient = WDClient(), logger=setup_logger(__name__)):
     """Get entity label for given entity (eid) if it exists"""
     if not str(eid).startswith("Q"):
         raise NameError("id of entity must start with 'Q'")
     index = ELASTIC_INDEX_ENT
-    return _get_label(eid, index, es_client, wd_client, logger)
+    return _get_label(eid, ent_dict, index, es_client, wd_client, logger)
 
 
 @uppercase
-def get_relation_label(rid: str, es_client: Elasticsearch = connect_to_elasticsearch(),
+def get_relation_label(rid: str, rel_dict: dict = None, es_client: Elasticsearch = None,
                        wd_client: WDClient = WDClient(), logger=setup_logger(__name__)):
     """Get relation label for given relation (rid) if it exists"""
     if not str(rid).startswith("P"):
         raise NameError("id of predicate (relation) must start with 'P'")
     index = ELASTIC_INDEX_REL
-    return _get_label(rid, index, es_client, wd_client, logger)
+    return _get_label(rid, rel_dict, index, es_client, wd_client, logger)
